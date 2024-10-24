@@ -4,89 +4,96 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::io::{self};
 use std::time::Instant;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::fs;
 use serde_json::json;
-
+use dotenv::dotenv;
+use std::env;
 
 mod kdtree;
 use kdtree::{KDTree, Point, Node};
 
 struct APPState {
-    trees: Mutex<HashMap<String, KDTreeCache>>, // Tree cache keyed by name
-    max_memory_usage: usize, // Maximum memory allowed for in-memory trees
+    trees: Mutex<HashMap<String, KDTreeCache>>,
+    max_memory_usage: usize,
+    bin_directory: PathBuf,
 }
+
 #[derive(Debug)]
 struct KDTreeCache {
-    tree: Option<KDTree>, // The actual KDTree (None means it's offloaded)
-    last_accessed: Instant, // Time when the tree was last accessed
+    tree: Option<KDTree>,
+    last_accessed: Instant,
 }
 
 #[derive(Deserialize)]
 struct QueryParams {
-    tree_name: String, // Name of the tree
-    n: Option<usize>, // Optional number of nearest neighbors to find
+    tree_name: String,
+    n: Option<usize>,
 }
 
-fn load_tree(tree_name: &str) -> io::Result<KDTree> {
-    let file_name = format!("{}.bin", tree_name);
-    if !Path::new(&file_name).exists() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("File not found: {}", file_name)));
+fn ensure_bin_directory(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        println!("Creating bin directory at: {:?}", path);
+        fs::create_dir_all(path)?;
     }
-    println!("Loading KDTree from file: {}", file_name); // Logging
-    KDTree::load_from_file(&file_name)
+    Ok(())
 }
 
-fn offload_tree(tree_name: &str, tree: &KDTree) -> io::Result<()> {
-    let file_name = format!("{}.bin", tree_name);
-    println!("Saving KDTree to file: {}", file_name); // Logging
-    tree.save_to_file(&file_name)
+fn get_bin_file_path(bin_directory: &Path, tree_name: &str) -> PathBuf {
+    bin_directory.join(format!("{}.bin", tree_name))
 }
 
+fn load_tree(bin_directory: &Path, tree_name: &str) -> io::Result<KDTree> {
+    let file_path = get_bin_file_path(bin_directory, tree_name);
+    if !file_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("File not found: {:?}", file_path)
+        ));
+    }
+    KDTree::load_from_file(file_path.to_str().unwrap())
+}
+
+fn offload_tree(bin_directory: &Path, tree_name: &str, tree: &KDTree) -> io::Result<()> {
+    let file_path = get_bin_file_path(bin_directory, tree_name);
+    tree.save_to_file(file_path.to_str().unwrap())
+}
 
 fn estimate_memory_usage(tree: &KDTree) -> usize {
     let mut total_size = 0;
-
-    // Size of the KDTree struct itself
-    total_size += size_of::<KDTree>();
-
-    // If the root exists, we need to calculate the size of the entire tree
+    total_size += std::mem::size_of::<KDTree>();
     if let Some(root) = &tree.root {
         total_size += estimate_node_size(&root);
     }
-
     total_size
 }
 
 fn estimate_node_size(node: &Box<Node>) -> usize {
     let mut total_size = 0;
-
-    // Size of the node itself (including its point and axis)
-    total_size += size_of_val(node);
-
-    // Estimate size of the left and right children recursively
+    total_size += std::mem::size_of_val(node);
     if let Some(left_child) = &node.left {
         total_size += estimate_node_size(&left_child);
     }
     if let Some(right_child) = &node.right {
         total_size += estimate_node_size(&right_child);
     }
-
     total_size
 }
 
-fn manage_memory(trees: &mut HashMap<String, KDTreeCache>, max_memory_usage: usize) {
+fn manage_memory(
+    trees: &mut HashMap<String, KDTreeCache>,
+    max_memory_usage: usize,
+    bin_directory: &Path
+) {
     let mut total_memory_usage = 0;
 
-    // Step 1: Calculate the total memory usage of currently loaded trees
     for cache in trees.values() {
         if let Some(tree) = &cache.tree {
             total_memory_usage += estimate_memory_usage(tree);
         }
     }
 
-    // Step 2: Trigger LRU logic if total memory usage exceeds the limit
     while total_memory_usage > max_memory_usage {
-        // Find the least recently used tree
         let mut least_recently_used: Option<(String, &KDTreeCache)> = None;
         for (key, cache) in trees.iter() {
             if cache.tree.is_some() {
@@ -100,169 +107,158 @@ fn manage_memory(trees: &mut HashMap<String, KDTreeCache>, max_memory_usage: usi
             }
         }
 
-        // Offload the least recently used tree
         if let Some((tree_name, _)) = least_recently_used {
             if let Some(cache) = trees.get_mut(&tree_name) {
                 if let Some(tree) = cache.tree.take() {
-                    offload_tree(&tree_name, &tree).unwrap();
+                    offload_tree(bin_directory, &tree_name, &tree).unwrap();
                     total_memory_usage -= estimate_memory_usage(&tree);
                 }
             }
         } else {
-            break; // No trees left to offload
+            break;
         }
     }
 }
 
-
-
-// API route to insert a point into a specific KD-Tree
 async fn insert_point(
-    data: web::Json<Point>, 
-    query: web::Query<QueryParams>, 
+    data: web::Json<Point>,
+    query: web::Query<QueryParams>,
     state: web::Data<APPState>
 ) -> impl Responder {
     let mut trees = state.trees.lock().unwrap();
     let tree_name = &query.tree_name;
 
-    // Check if the tree exists in memory or needs to be created
     let cache = trees.entry(tree_name.clone()).or_insert_with(|| {
-        let new_tree = KDTree::new(data.0.len()); // Create a new tree with the dimension of the incoming point
+        let new_tree = KDTree::new(data.0.len());
         KDTreeCache {
             tree: Some(new_tree),
             last_accessed: Instant::now(),
         }
     });
 
-    // Load the tree from disk if it exists but is not loaded yet
     if cache.tree.is_none() {
-        cache.tree = Some(load_tree(tree_name).unwrap());
+        cache.tree = Some(load_tree(&state.bin_directory, tree_name).unwrap());
     }
 
-    // Update last accessed time
     cache.last_accessed = Instant::now();
 
     if let Some(ref mut tree) = cache.tree {
-        // Insert the point into the KD-Tree
         tree.insert(data.into_inner());
 
-        // Immediately save the tree to disk after insertion
-        if let Err(e) = offload_tree(tree_name, tree) {
+        if let Err(e) = offload_tree(&state.bin_directory, tree_name, tree) {
             return HttpResponse::InternalServerError().body(format!("Failed to save KD-Tree: {}", e));
         }
 
-        // Manage memory
-        manage_memory(&mut trees, state.max_memory_usage);
+        manage_memory(&mut trees, state.max_memory_usage, &state.bin_directory);
         HttpResponse::Ok().json("Point inserted into KD-Tree and saved to disk")
     } else {
         HttpResponse::InternalServerError().body("Failed to load or create KD-Tree")
     }
 }
 
-
-
-
 async fn nearest_neighbor_top_n(
-    data: web::Json<Point>, 
-    query: web::Query<QueryParams>, 
+    data: web::Json<Point>,
+    query: web::Query<QueryParams>,
     state: web::Data<APPState>
 ) -> impl Responder {
     let mut trees = state.trees.lock().unwrap();
     let tree_name = &query.tree_name;
-    if let Some(tree) = trees.get_mut(tree_name) {
-        println!("Tree found: {:?}", tree); // This will still require Debug
-    } else {
-        println!("No tree found with the name: {}", tree_name);
-    }
+
     if let Some(cache) = trees.get_mut(tree_name) {
-    if cache.tree.is_none() {
-        match load_tree(tree_name) {
+        if cache.tree.is_none() {
+            match load_tree(&state.bin_directory, tree_name) {
+                Ok(tree) => {
+                    cache.tree = Some(tree);
+                },
+                Err(e) => {
+                    return HttpResponse::InternalServerError().body(format!("Error loading tree: {}", e));
+                }
+            }
+        }
+        cache.last_accessed = Instant::now();
+    } else {
+        let new_cache = KDTreeCache {
+            tree: None,
+            last_accessed: Instant::now(),
+        };
+        trees.insert(tree_name.to_string(), new_cache);
+        match load_tree(&state.bin_directory, tree_name) {
             Ok(tree) => {
-                cache.tree = Some(tree);
+                if let Some(cache) = trees.get_mut(tree_name) {
+                    cache.tree = Some(tree);
+                }
             },
             Err(e) => {
                 return HttpResponse::InternalServerError().body(format!("Error loading tree: {}", e));
             }
         }
     }
-    cache.last_accessed = Instant::now();
-} else {
-    println!("Creating new cache entry for {}", tree_name);
-    let new_cache = KDTreeCache {
-        tree: None, // Initially, there is no tree
-        last_accessed: Instant::now(),
-    };
-    trees.insert(tree_name.to_string(), new_cache);
-    match load_tree(tree_name) {
-        Ok(tree) => {
-            if let Some(cache) = trees.get_mut(tree_name) {
-                cache.tree = Some(tree);
-            }
-        },
-        Err(e) => {
-            return HttpResponse::InternalServerError().body(format!("Error loading tree: {}", e));
-        }
-    }
-}
-if let Some(ref cache) = trees.get(tree_name) {
-    if let Some(ref tree) = cache.tree {
-        if let Some(n) = query.n {
-            if let Some(nearest_neighbors) = tree.nearest_neighbors_topn(&data.into_inner(), n) {
-                return HttpResponse::Ok().json(nearest_neighbors);
+
+    if let Some(ref cache) = trees.get(tree_name) {
+        if let Some(ref tree) = cache.tree {
+            if let Some(n) = query.n {
+                if let Some(nearest_neighbors) = tree.nearest_neighbors_topn(&data.into_inner(), n) {
+                    return HttpResponse::Ok().json(nearest_neighbors);
+                }
             }
         }
     }
-}
 
-
-    // Manage memory
-    manage_memory(&mut trees, state.max_memory_usage);
+    manage_memory(&mut trees, state.max_memory_usage, &state.bin_directory);
     HttpResponse::NotFound().body("No nearest neighbors found or tree not found")
 }
 
-
-// API route to get the status of all KD-Trees
 async fn get_status(state: web::Data<APPState>) -> impl Responder {
-    let mut trees = state.trees.lock().unwrap(); // Need mutable access to load trees if necessary
+    let mut trees = state.trees.lock().unwrap();
 
     let status: Vec<_> = trees.iter_mut().map(|(tree_name, cache)| {
-        // Check if the tree is offloaded (i.e., not in memory)
         if cache.tree.is_none() {
-            // Attempt to load the tree from disk
-            if let Ok(loaded_tree) = load_tree(tree_name) {
+            if let Ok(loaded_tree) = load_tree(&state.bin_directory, tree_name) {
                 cache.tree = Some(loaded_tree);
             }
         }
 
-        // After loading, check the length
         json!({
             "tree_name": tree_name,
-            "num_records": cache.tree.as_ref().map_or(0, |tree| tree.len()), // Get number of records, or 0 if tree is still None
-            "in_memory": cache.tree.is_some(), // Check if the tree is in memory
-            "last_accessed": cache.last_accessed.elapsed().as_secs(), // Time in seconds since last accessed
+            "num_records": cache.tree.as_ref().map_or(0, |tree| tree.len()),
+            "in_memory": cache.tree.is_some(),
+            "last_accessed": cache.last_accessed.elapsed().as_secs(),
         })
     }).collect();
 
     HttpResponse::Ok().json(json!({
-        "active_trees": status.len(), // Number of active trees
-        "trees": status, // Detailed info about each tree
+        "active_trees": status.len(),
+        "trees": status,
     }))
 }
 
-
-// Similar approach for nearest_neighbor_top_n
-
 #[actix_web::main]
 async fn main() -> io::Result<()> {
+    // Load environment variables from .env file
+    dotenv().ok();
+
+    // Get configuration from environment variables with defaults
+    let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let max_memory_mb = env::var("MAX_MEMORY_MB")
+        .unwrap_or_else(|_| "1024".to_string())
+        .parse::<usize>()
+        .unwrap_or(1024);
+    let bin_directory = env::var("BIN_DIRECTORY")
+        .unwrap_or_else(|_| "bin".to_string());
+
+    // Create bin directory if it doesn't exist
+    let bin_path = PathBuf::from(&bin_directory);
+    ensure_bin_directory(&bin_path)?;
+
     let trees: HashMap<String, KDTreeCache> = HashMap::new();
-
-
     let shared_data = web::Data::new(APPState {
         trees: Mutex::new(trees),
-        max_memory_usage: 1024 * 1024 * 1024, // 1GB of memory limit (adjust as needed)
+        max_memory_usage: max_memory_mb * 1024 * 1024, // Convert MB to bytes
+        bin_directory: bin_path,
     });
 
-    let address = "127.0.0.1:8080";
+    let address = format!("{}:{}", host, port);
     let server = HttpServer::new(move || {
         App::new()
             .app_data(shared_data.clone())
@@ -270,8 +266,11 @@ async fn main() -> io::Result<()> {
             .route("/nearesttop", web::post().to(nearest_neighbor_top_n))
             .route("/status", web::get().to(get_status))
     })
-    .bind(address)?;
-    
+    .bind(&address)?;
+
     println!("Server running on {}", address);
+    println!("Binary files directory: {:?}", bin_directory);
+    println!("Maximum memory usage: {} MB", max_memory_mb);
+    
     server.run().await
 }
