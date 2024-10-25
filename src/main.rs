@@ -128,33 +128,44 @@ async fn insert_point(
     let mut trees = state.trees.lock().unwrap();
     let tree_name = &query.tree_name;
 
-    let cache = trees.entry(tree_name.clone()).or_insert_with(|| {
-        let new_tree = KDTree::new(data.0.len());
-        KDTreeCache {
-            tree: Some(new_tree),
-            last_accessed: Instant::now(),
-        }
+    // Check if the tree is in memory
+    let cache = trees.entry(tree_name.clone()).or_insert_with(|| KDTreeCache {
+        tree: None,
+        last_accessed: Instant::now(),
     });
 
+    // Try loading from disk if the tree isn't in memory
     if cache.tree.is_none() {
-        cache.tree = Some(load_tree(&state.bin_directory, tree_name).unwrap());
+        match load_tree(&state.bin_directory, tree_name) {
+            Ok(loaded_tree) => cache.tree = Some(loaded_tree),
+            Err(e) => {
+                // If loading fails, create a new tree and log the error
+                println!("Error loading KD-Tree from file: {}, creating a new one", e);
+                cache.tree = Some(KDTree::new(data.0.len()));
+            }
+        }
     }
 
+    // Update last accessed time
     cache.last_accessed = Instant::now();
 
+    // Insert the new point and attempt to save the updated tree
     if let Some(ref mut tree) = cache.tree {
         tree.insert(data.into_inner());
 
+        // Save the KD-tree to disk
         if let Err(e) = offload_tree(&state.bin_directory, tree_name, tree) {
             return HttpResponse::InternalServerError().body(format!("Failed to save KD-Tree: {}", e));
         }
 
+        // Manage memory if the usage exceeds limits
         manage_memory(&mut trees, state.max_memory_usage, &state.bin_directory);
         HttpResponse::Ok().json("Point inserted into KD-Tree and saved to disk")
     } else {
         HttpResponse::InternalServerError().body("Failed to load or create KD-Tree")
     }
 }
+
 
 async fn nearest_neighbor_top_n(
     data: web::Json<Point>,
