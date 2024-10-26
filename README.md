@@ -1,6 +1,9 @@
 # Vector-Store
 
-A lightweight, disk-persistent vector storage and search service using KD-Trees. Built with Rust and Actix-web, providing efficient nearest neighbor search capabilities with automatic memory management.
+A lightweight, disk-persistent vector storage and search service using KD-Trees. Built with Rust and Actix-web, providing efficient nearest neighbor search capabilities with automatic memory management. 
+<br/>
+# Use case 
+-[RAG-Framework](https://github.com/Abhigyan126/RAG-Framework) 
 
 ## Features
 
