@@ -3,8 +3,8 @@
 A lightweight, disk-persistent vector storage and search service using KD-Trees. Built with Rust and Actix-web, providing efficient nearest neighbor search capabilities with automatic memory management. 
 <br/>
 # Use case 
--[RAG-Framework](https://github.com/Abhigyan126/RAG-Framework) 
--[LLM + MEM](https://github.com/Abhigyan126/LLM-MEM)
+- [RAG-Framework](https://github.com/Abhigyan126/RAG-Framework) 
+- [LLM + MEM](https://github.com/Abhigyan126/LLM-MEM)
 
 ## Features
 
