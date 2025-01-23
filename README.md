@@ -6,6 +6,39 @@ A lightweight, disk-persistent vector storage and search service using KD-Trees.
 - [RAG-Framework](https://github.com/Abhigyan126/RAG-Framework) 
 - [LLM + MEM](https://github.com/Abhigyan126/LLM-MEM)
 
+## Flowchart
+```mermaid
+%%{init: {'theme': 'black', 'themeVariables': { 'fontSize': '16px'}, "securityLevel": "loose"}}%%
+flowchart TD
+    subgraph "HTTP Request Handler"
+        A[Client Request] --> B{Routing}
+        B -->|POST /insert| InsertEndpoint
+        B -->|POST /nearesttop| NNEndpoint
+        B -->|GET /status| StatusEndpoint
+    end
+
+    subgraph "Memory Management"
+        MM[Mutex-Protected Tree Cache]
+        MemoryManager{Least Recently Used\nEviction Strategy}
+        DiskStorage[(Binary File Storage)]
+    end
+
+    subgraph "KDTree Operations"
+        InsertEndpoint --> TreeInsert[Insert Point\n1. Recursive Insertion\n2. Axis Determination]
+        NNEndpoint --> NNSearch[Nearest Neighbor Search\n1. Recursive Traversal\n2. Distance Calculation]
+    end
+
+    InsertEndpoint --> MM
+    NNEndpoint --> MM
+    StatusEndpoint --> MM
+
+    MM --> |Load/Evict| MemoryManager
+    MemoryManager --> |Serialize/Deserialize| DiskStorage
+
+    TreeInsert --> |Persist| DiskStorage
+    NNSearch --> |Optional Persist| DiskStorage
+```
+
 ## Features
 
 - 🚀 Fast nearest neighbor search using KD-Trees
