@@ -17,26 +17,25 @@ flowchart TD
         B -->|GET /status| StatusEndpoint
     end
 
-    subgraph "Memory Management"
+    subgraph "Memory Management "
         MM[Mutex-Protected Tree Cache]
-        MemoryManager{Least Recently Used\nEviction Strategy}
+        MemoryManager{Least Recently Used<br>Eviction Strategy}
         DiskStorage[(Binary File Storage)]
+        MM --> |Load/Evict| MemoryManager
+        MemoryManager --> |Serialize/Deserialize| DiskStorage
     end
 
     subgraph "KDTree Operations"
-        InsertEndpoint --> TreeInsert[Insert Point\n1. Recursive Insertion\n2. Axis Determination]
-        NNEndpoint --> NNSearch[Nearest Neighbor Search\n1. Recursive Traversal\n2. Distance Calculation]
+        InsertEndpoint --> TreeInsert[Insert Point<br>1. Recursive Insertion<br>2. Axis Determination]
+        NNEndpoint --> NNSearch[Nearest Neighbor Search<br>1. Recursive Traversal<br>2. Distance Calculation]
+        TreeInsert --> |Persist| DiskStorage
+        NNSearch --> |Optional Persist| DiskStorage
     end
 
     InsertEndpoint --> MM
     NNEndpoint --> MM
     StatusEndpoint --> MM
 
-    MM --> |Load/Evict| MemoryManager
-    MemoryManager --> |Serialize/Deserialize| DiskStorage
-
-    TreeInsert --> |Persist| DiskStorage
-    NNSearch --> |Optional Persist| DiskStorage
 ```
 
 ## Features
